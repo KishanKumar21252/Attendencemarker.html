@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>QR Attendance — Rural School Prototype</title>
+  <style>
+    :root{--bg:#f7f7fb;--card:#ffffff;--muted:#666}
+    body{font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:var(--bg);color:#111}
+    .container{max-width:1000px;margin:24px auto;padding:20px}
+    header{display:flex;gap:16px;align-items:center}
+    .card{background:var(--card);border-radius:12px;padding:16px;box-shadow:0 6px 18px rgba(20,20,40,0.06);}
+    .grid{display:grid;grid-template-columns:1fr 360px;gap:16px;margin-top:16px}
+    h1{margin:0;font-size:20px}
+    small{color:var(--muted)}
+    button{background:#0b63ff;color:#fff;padding:8px 12px;border-radius:8px;border:0;cursor:pointer}
+    .list{max-height:420px;overflow:auto;margin-top:12px}
+    table{width:100%;border-collapse:collapse}
+    td,th{padding:8px;border-bottom:1px solid #eee;text-align:left}
+    .muted{color:var(--muted)}
+    input,select{padding:8px;border-radius:8px;border:1px solid #ddd;width:100%}
+    .controls{display:flex;gap:8px;flex-wrap:wrap}
+    .scanner-box{min-height:300px}
+    .footer-note{font-size:13px;color:var(--muted);margin-top:8px}
+  </style>
+  <!-- html5-qrcode library (scanner) -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/minified/html5-qrcode.min.js"></script>
+  <!-- qrcode generator (optional) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrious/4.0.2/qrious.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Automated QR-scan Attendance — Prototype</h1>
+        <small class="muted">Designed for low-connectivity rural school use — works offline in a browser once loaded.</small>
+      </div>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <section>
+          <h2 style="font-size:16px;margin-bottom:8px">Scanner</h2>
+          <div id="scanner" class="scanner-box"></div>
+          <div style="margin-top:10px" class="controls">
+            <select id="cameraSelect"></select>
+            <button id="startBtn">Start</button>
+            <button id="stopBtn" disabled>Stop</button>
+            <button id="exportCsvBtn">Export CSV</button>
+            <button id="clearBtn">Clear</button>
+          </div>
+          <div class="footer-note">If camera isn't available, use manual entry below or generate printed QR cards for students.</div>
+        </section>
+
+        <section style="margin-top:18px">
+          <h3 style="margin:0 0 8px 0">Manual / Roster tools</h3>
+          <div style="display:grid;grid-template-columns:1fr 120px;gap:8px;">
+            <input id="manualId" placeholder="Student ID or QR payload" />
+            <button id="manualAdd">Mark Present</button>
+          </div>
+
+          <div style="margin-top:10px">
+            <label class="muted">Upload roster CSV (id,name) — optional</label>
+            <input id="rosterFile" type="file" accept="text/csv" />
+          </div>
+        </section>
+
+      </div>
+
+      <aside class="card">
+        <h3 style="margin-top:0">Attendance — Today</h3>
+        <div id="stats" style="margin-bottom:8px" class="muted">Loaded from local storage</div>
+        <div class="list" id="attList">
+          <table>
+            <thead>
+              <tr><th>ID</th><th>    </th><th>Time</th></tr>
+            </thead>
+            <tbody id="attTbody"></tbody>
+          </table>
+        </div>
+
+        <hr style="margin:12px 0" />
+        <h4 style="margin:6px 0">Generate QR for ID</h4>
+        <div style="display:grid;gap:8px">
+          <input id="qrId" placeholder="student-id-123" />
+          <canvas id="qrCanvas" style="border-radius:8px;background:#fff;padding:8px"></canvas>
+          <button id="genQrBtn">Generate</button>
+        </div>
+
+      </aside>
+    </div>
+  </div>
+
+<script>
+// --- Simple offline-friendly attendance prototype ---
+const ATT_KEY = 'qr_attendance_records_v1';
+const ROSTER_KEY = 'qr_roster_v1';
+let html5QrCode;
+let currentCameraId = null;
+let roster = {}; // id -> name
+let attendance = loadAttendance();
+
+function loadAttendance(){
+  try{
+    const raw = localStorage.getItem(ATT_KEY) || '[]';
+    return JSON.parse(raw);
+  }catch(e){return []}
+}
+function saveAttendance(){
+  localStorage.setItem(ATT_KEY, JSON.stringify(attendance));
+}
+function loadRoster(){
+  try{ const raw = localStorage.getItem(ROSTER_KEY) || '{}'; roster = JSON.parse(raw);}catch(e){roster={}};
+}
+function saveRoster(){
+  localStorage.setItem(ROSTER_KEY, JSON.stringify(roster));
+}
+
+function displayAttendance(){
+  const tbody = document.getElementById('attTbody');
+  tbody.innerHTML = '';
+  attendance.slice().reverse().forEach(rec=>{
+    const tr = document.createElement('tr');
+    const idTd=document.createElement('td'); idTd.textContent=rec.id;
+    const nameTd=document.createElement('td'); nameTd.textContent = roster[rec.id] || rec.name || '';
+    const tTd=document.createElement('td'); tTd.textContent = new Date(rec.ts).toLocaleString('en-IN');
+    tr.appendChild(idTd);tr.appendChild(nameTd);tr.appendChild(tTd);
+    tbody.appendChild(tr);
+  });
+  document.getElementById('stats').textContent = `${attendance.length} records — Saved locally`;
+}
+
+function onScanSuccess(decodedText, decodedResult){
+  let id = decodedText;
+  let name = '';
+  try{
+    const parsed = JSON.parse(decodedText);
+    if(parsed && parsed.id){ id = parsed.id; name = parsed.name || '' }
+  }catch(e){}
+  markPresent(id, name, true);
+}
+
+function markPresent(id, name='', fromScan=false){
+  if(!id) return;
+  const now = Date.now();
+  const recent = attendance.find(a=>a.id===id && now - a.ts < 30*1000);
+  if(recent){ if(!fromScan) alert('This student was just marked.'); return; }
+  attendance.push({id, name, ts: now});
+  saveAttendance();
+  displayAttendance();
+}
+
+function exportCsv(){
+  const rows = [['id','name','timestamp']];
+  attendance.forEach(r=> rows.push([r.id, roster[r.id] || r.name || '', new Date(r.ts).toISOString()]));
+  const csv = rows.map(r=>r.map(c=>`"${String(c||'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv],{type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download = `attendance-${new Date().toISOString().slice(0,10)}.csv`; a.click();
+  URL.revokeObjectURL(url);
+}
+
+window.addEventListener('load', async ()=>{
+  loadRoster();
+  displayAttendance();
+
+  const cameraSelect = document.getElementById('cameraSelect');
+  try{
+    const devices = await Html5Qrcode.getCameras();
+    devices.forEach(d=>{
+      const opt = document.createElement('option'); opt.value=d.id; opt.textContent = d.label || d.id; cameraSelect.appendChild(opt);
+    });
+    if(devices.length>0){ currentCameraId = devices[0].id; cameraSelect.value=currentCameraId }
+  }catch(e){
+    const opt = document.createElement('option'); opt.textContent = 'No camera available'; cameraSelect.appendChild(opt);
+  }
+
+  cameraSelect.addEventListener('change', (e)=>{ currentCameraId = e.target.value; });
+
+  document.getElementById('startBtn').addEventListener('click', ()=>{
+    if(!currentCameraId){ alert('No camera selected.'); return; }
+    if(!html5QrCode) html5QrCode = new Html5Qrcode('scanner');
+    html5QrCode.start(
+      currentCameraId,
+      { fps: 10, qrbox: {width: 250, height: 250} },
+      onScanSuccess,
+      (err)=>{ }
+    ).then(()=>{
+      document.getElementById('startBtn').disabled = true;
+      document.getElementById('stopBtn').disabled = false;
+    }).catch(err=>{ alert('Unable to start camera: '+err); });
+  });
+
+  document.getElementById('stopBtn').addEventListener('click', ()=>{
+    if(html5QrCode){ html5QrCode.stop().then(()=>{ document.getElementById('startBtn').disabled=false; document.getElementById('stopBtn').disabled=true; }).catch(()=>{}); }
+  });
+
+  document.getElementById('manualAdd').addEventListener('click', ()=>{
+    const v = document.getElementById('manualId').value.trim();
+    if(!v) return alert('Enter ID');
+    let name='';
+    if(v.includes('{')){
+      try{ const p = JSON.parse(v); if(p.id) { markPresent(p.id,p.name||''); document.getElementById('manualId').value=''; return; } }catch(e){}
+    }
+    markPresent(v,'',false);
+    document.getElementById('manualId').value='';
+  });
+
+  document.getElementById('exportCsvBtn').addEventListener('click', exportCsv);
+  document.getElementById('clearBtn').addEventListener('click', ()=>{ if(confirm('Clear all attendance records?')){ attendance=[]; saveAttendance(); displayAttendance(); } });
+
+  document.getElementById('rosterFile').addEventListener('change', (e)=>{
+    const f = e.target.files[0]; if(!f) return;
+    const reader = new FileReader();
+    reader.onload = ()=>{
+      const txt = reader.result;
+      txt.split(/\r?\n/).forEach(line=>{
+        const parts = line.split(',').map(s=>s.trim());
+        if(parts[0]) roster[parts[0]] = parts.slice(1).join(',') || roster[parts[0]] || '';
+      });
+      saveRoster();
+      displayAttendance();
+      alert('Roster loaded: ' + Object.keys(roster).length + ' entries');
+    };
+    reader.readAsText(f);
+  });
+
+  document.getElementById('genQrBtn').addEventListener('click', ()=>{
+    const id = document.getElementById('qrId').value.trim(); if(!id) return alert('Enter an ID to generate');
+    const qr = new QRious({element: document.getElementById('qrCanvas'), value: id, size: 200});
+  });
+
+});
+</script>
+</body>
+</html>
